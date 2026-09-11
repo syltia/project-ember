@@ -56,6 +56,7 @@ git submodule add -f https://github.com/azerothcore/mod-ah-bot modules/mod-ah-bo
 git submodule add -f https://github.com/jrad7/mod-dungeon-clear modules/mod-dungeon-clear
 git submodule add -f https://github.com/Wishmaster117/mod-multibot-bridge modules/mod-multibot-bridge
 git submodule add -f https://github.com/azerothcore/mod-account-mounts modules/mod-account-mounts
+git submodule add -f https://github.com/azerothcore/eluna-ts modules/eluna-ts
 
 echo "--- 7. Downloading finalize script ---"
 curl -o /root/finalize.sh https://raw.githubusercontent.com/syltia/wow/main/finalize.sh && chmod +x /root/finalize.sh
