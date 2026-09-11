@@ -1,26 +1,78 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-echo "--- 1. Updating Debian and installing dependencies ---"
-apt update && apt upgrade -y
+if [ "${EUID}" -ne 0 ]; then
+    echo "This script must be run as root."
+    exit 1
+fi
 
-echo "--- 2. Configuring SSH ---"
-sed -ie '0,/#PermitRootLogin prohibit-password/s/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-service sshd restart
+echo "--- 1. Updating Debian ---"
+apt update
+apt upgrade -y
 
-echo "--- 3. Configuring GRUB ---"
+echo "--- 2. Installing base development tools ---"
+apt install -y \
+    build-essential \
+    cmake \
+    ninja-build \
+    clang \
+    lldb \
+    gdb \
+    git \
+    curl \
+    wget \
+    tmux \
+    pkg-config \
+    ca-certificates \
+    gnupg \
+    unzip \
+    zip \
+    libssl-dev \
+    zlib1g-dev
+
+echo "--- 3. Installing PostgreSQL ---"
+apt install -y \
+    postgresql \
+    postgresql-contrib \
+    libpq-dev
+
+systemctl enable postgresql
+systemctl start postgresql
+
+echo "--- 4. Verifying PostgreSQL ---"
+if ! pg_isready >/dev/null 2>&1; then
+    echo "PostgreSQL is not ready."
+    exit 1
+fi
+
+POSTGRES_VERSION=$(sudo -u postgres psql -Atqc "SHOW server_version;")
+echo "PostgreSQL is online: $POSTGRES_VERSION"
+
+echo "--- 5. Configuring SSH ---"
+if grep -q '^#PermitRootLogin prohibit-password' /etc/ssh/sshd_config; then
+    sed -i '0,/^#PermitRootLogin prohibit-password/s//PermitRootLogin yes/' /etc/ssh/sshd_config
+elif grep -q '^PermitRootLogin ' /etc/ssh/sshd_config; then
+    sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
+else
+    echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+fi
+
+systemctl restart ssh
+
+echo "--- 6. Configuring GRUB ---"
 sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=1/' /etc/default/grub
 sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
 update-grub
 
-echo "--- 4. Configuring Static IP ---"
+echo "--- 7. Configuring static IP from current network values ---"
 INTERFACE=$(ip -o link show | awk -F': ' '$2 != "lo" {print $2; exit}')
-CURRENT_IP=$(ip -4 addr show $INTERFACE | grep -oP '(?<=inet )\d+(\.\d+){3}')
-GATEWAY=$(ip route | grep default | awk '{print $3}')
+CURRENT_IP=$(ip -4 addr show "$INTERFACE" | grep -oP '(?<=inet )\d+(\.\d+){3}' | head -n1)
+GATEWAY=$(ip route | awk '/default/ {print $3; exit}')
 
-echo "Applying static IP: $CURRENT_IP on interface $INTERFACE (Gateway: $GATEWAY)"
+if [ -n "$INTERFACE" ] && [ -n "$CURRENT_IP" ] && [ -n "$GATEWAY" ]; then
+    echo "Applying static IP: $CURRENT_IP on interface $INTERFACE (Gateway: $GATEWAY)"
 
-cat <<EOF > /etc/network/interfaces
+    cat <<EOF > /etc/network/interfaces
 source /etc/network/interfaces.d/*
 
 auto lo
@@ -31,119 +83,32 @@ iface $INTERFACE inet static
     address $CURRENT_IP
     netmask 255.255.255.0
     gateway $GATEWAY
-    dns-domain azeroth.core
-    dns-nameservers 8.8.8.8
+    dns-domain azeroth.eras
+    dns-nameservers 8.8.8.8 1.1.1.1
 EOF
 
-systemctl restart networking.service
-until ping -c 1 github.com &>/dev/null; do
-    sleep 1
-done
-
-echo "--- 5. Cloning AzerothCore and main module ---"
-cd ~
-git clone https://github.com/mod-playerbots/azerothcore-wotlk.git --branch=Playerbot
-
-cd ~/azerothcore-wotlk/modules
-if [ ! -d "mod-playerbots" ]; then
-    git clone https://github.com/mod-playerbots/mod-playerbots.git --branch=master
-fi 
-
-echo "--- 6. Adding custom submodules ---"
-cd ~/azerothcore-wotlk
-git submodule add -f https://github.com/ZhengPeiRu21/mod-individual-progression modules/mod-individual-progression
-git submodule add -f https://github.com/azerothcore/mod-ah-bot modules/mod-ah-bot
-git submodule add -f https://github.com/jrad7/mod-dungeon-clear modules/mod-dungeon-clear
-git submodule add -f https://github.com/Wishmaster117/mod-multibot-bridge modules/mod-multibot-bridge
-git submodule add -f https://github.com/azerothcore/mod-account-mounts modules/mod-account-mounts
-git submodule add -f https://github.com/azerothcore/eluna-ts modules/eluna-ts
-
-echo "--- 7. Downloading finalize script ---"
-curl -o /root/finalize.sh https://raw.githubusercontent.com/syltia/wow/main/finalize.sh && chmod +x /root/finalize.sh
-
-echo "--- 8. Creating startup script and aliases ---"
-cat << 'EOF' > /root/start.sh
-cd ~/azerothcore-wotlk/env/dist/bin
-authserver="./authserver"
-worldserver="./worldserver"
-
-authserver_session="auth-session"
-worldserver_session="world-session"
-
-if tmux new-session -d -s $authserver_session; then
-    echo "Created authserver session: $authserver_session"
+    systemctl restart networking.service
 else
-    echo "Error when trying to create authserver session: $authserver_session"
+    echo "Could not determine the current network configuration. Static IP step skipped."
 fi
 
-if tmux new-session -d -s $worldserver_session; then
-    echo "Created worldserver session: $worldserver_session"
-else
-    echo "Error when trying to create worldserver session: $worldserver_session"
-fi
+echo "--- 8. Creating Ember workspace ---"
+mkdir -p /root/ember/{src,build,logs,sql}
 
-if tmux send-keys -t $authserver_session "$authserver" C-m; then
-    echo "Executed \"$authserver\" inside $authserver_session"
-    echo "You can attach to $authserver_session and check the result using \"tmux attach -t $authserver_session\""
-else
-    echo "Error when executing \"$authserver\" inside $authserver_session"
-fi
+echo "--- 9. Creating useful aliases ---"
+cat <<'EOF' >> /root/.bashrc
 
-if tmux send-keys -t $worldserver_session "$worldserver" C-m; then
-    echo "Executed \"$worldserver\" inside $worldserver_session"
-    echo "You can attach to $worldserver_session and check the result using \"tmux attach -t $worldserver_session\""
-else
-    echo "Error when executing \"$worldserver\" inside $worldserver_session"
-fi
+# Project Ember
+alias ember='cd /root/ember'
+alias psql-ember='sudo -u postgres psql'
+alias pgstatus='systemctl status postgresql --no-pager'
+alias pgrestart='systemctl restart postgresql'
+alias qqq='shutdown now'
 EOF
-
-chmod +x /root/start.sh
-
-cat << 'EOF' > ~/.bashrc
-# ~/.bashrc: executed by bash(1) for non-login shells.
-
-# Note: PS1 is set in /etc/profile, and the default umask is defined
-# in /etc/login.defs. You should not need this unless you want different
-# defaults for root.
-# PS1='${debian_chroot:+($debian_chroot)}\h:\w\$ '
-# umask 022
-
-# You may uncomment the following lines if you wish to enable colorized output:
-# export LS_OPTIONS='--color=auto'
-# eval "$(dircolors)"
-# alias ls='ls $LS_OPTIONS'
-# alias ll='ls $LS_OPTIONS -l'
-# alias l='ls $LS_OPTIONS -lA'
-alias wow='cd ~/azerothcore-wotlk;tmux attach -t world-session'
-alias auth='cd ~/azerothcore-wotlk;tmux attach -t auth-session'
-alias start='bash /root/start.sh'
-alias stop='tmux kill-server'
-alias compile='cd ~/azerothcore-wotlk;./acore.sh compiler all'
-alias build='cd ~/azerothcore-wotlk;./acore.sh compiler build'
-alias update='cd ~/azerothcore-wotlk;git pull;cd ~/azerothcore-wotlk/modules/mod-playerbots;git pull'
-alias pb='nano ~/azerothcore-wotlk/env/dist/etc/modules/playerbots.conf'
-alias world='nano ~/azerothcore-wotlk/env/dist/etc/worldserver.conf'
-alias updatemods="cd ~/azerothcore-wotlk/modules;find . -mindepth 1 -maxdepth 1 -type d -print -exec git -C {} pull \;"
-alias ah='nano ~/azerothcore-wotlk/env/dist/etc/modules/mod_ahbot.conf'
-alias qqq='sudo shutdown now'
-EOF
-
-source ~/.bashrc
-
-echo "--- 9. Running AzerothCore dependencies script ---"
-cd ~/azerothcore-wotlk
-./acore.sh install-deps
 
 echo "=================================================================="
-echo "Preparation script completed! Your machine is ready."
+echo "Project Ember base VM is ready."
+echo "Debian + PostgreSQL installed successfully."
+echo "Workspace: /root/ember"
+echo "No AzerothCore/MySQL/MariaDB components were installed by this script."
 echo "=================================================================="
-echo ""
-
-read -p "Do you want to run compilation now? (y/n) : " choice
-if [[ "$choice" =~ ^[oO](ui)?$|[yY](es)?$ ]]; then
-    echo "Starting compilation..."
-    cd ~/azerothcore-wotlk
-    ./acore.sh compiler all
-else
-    echo "Compilation skipped. You can run it later using the alias: compile"
-fi
