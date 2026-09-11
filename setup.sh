@@ -27,9 +27,15 @@ apt install -y \
     gnupg \
     unzip \
     zip \
-    ufw \
     libssl-dev \
     zlib1g-dev
+
+if ! command -v ufw >/dev/null 2>&1; then
+    echo "--- Installing UFW ---"
+    apt install -y ufw
+else
+    echo "--- UFW is already installed ---"
+fi
 
 echo "--- 3. Installing PostgreSQL ---"
 apt install -y \
