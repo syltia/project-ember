@@ -27,6 +27,7 @@ apt install -y \
     gnupg \
     unzip \
     zip \
+    ufw \
     libssl-dev \
     zlib1g-dev
 
@@ -59,12 +60,21 @@ fi
 
 systemctl restart ssh
 
-echo "--- 6. Configuring GRUB ---"
+echo "--- 6. Configuring UFW firewall ---"
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp comment 'SSH'
+ufw allow 3724/tcp comment 'WoW Auth'
+ufw allow 8085/tcp comment 'WoW World'
+ufw --force enable
+ufw status verbose
+
+echo "--- 7. Configuring GRUB ---"
 sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=1/' /etc/default/grub
 sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
 update-grub
 
-echo "--- 7. Configuring static IP from current network values ---"
+echo "--- 8. Configuring static IP from current network values ---"
 INTERFACE=$(ip -o link show | awk -F': ' '$2 != "lo" {print $2; exit}')
 CURRENT_IP=$(ip -4 addr show "$INTERFACE" | grep -oP '(?<=inet )\d+(\.\d+){3}' | head -n1)
 GATEWAY=$(ip route | awk '/default/ {print $3; exit}')
@@ -92,10 +102,10 @@ else
     echo "Could not determine the current network configuration. Static IP step skipped."
 fi
 
-echo "--- 8. Creating Ember workspace ---"
+echo "--- 9. Creating Ember workspace ---"
 mkdir -p /root/ember/{src,build,logs,sql}
 
-echo "--- 9. Creating useful aliases ---"
+echo "--- 10. Creating useful aliases ---"
 cat <<'EOF' >> /root/.bashrc
 
 # Project Ember
@@ -109,6 +119,7 @@ EOF
 echo "=================================================================="
 echo "Project Ember base VM is ready."
 echo "Debian + PostgreSQL installed successfully."
+echo "UFW enabled: SSH 22/tcp, WoW Auth 3724/tcp, WoW World 8085/tcp."
 echo "Workspace: /root/ember"
 echo "No AzerothCore/MySQL/MariaDB components were installed by this script."
 echo "=================================================================="
